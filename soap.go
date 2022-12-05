@@ -5,7 +5,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/httputil"
@@ -17,15 +16,13 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-type SoapParams interface{}
-
 // HeaderParams holds params specific to the header
 type HeaderParams map[string]interface{}
 
 // Params type is used to set the params in soap request
+type SoapParams interface{}
 type Params map[string]interface{}
 type ArrayParams [][2]interface{}
-type SliceParams []interface{}
 
 type DumpLogger interface {
 	LogRequest(method string, dump []byte)
@@ -85,7 +82,7 @@ type Client struct {
 	AutoAction   bool
 	URL          string
 	HeaderName   string
-	HeaderParams SoapParams
+	HeaderParams HeaderParams
 	Definitions  *wsdlDefinitions
 	// Must be set before first request otherwise has no effect, minimum is 15 minutes.
 	RefreshDefinitionsAfter time.Duration
@@ -166,7 +163,7 @@ func (c *Client) Do(req *Request) (res *Response, err error) {
 		return nil, errors.New("wsdl definitions not found")
 	}
 
-	if c.Definitions.Services == nil {
+	if overrideSoapEndpoint == "" && c.Definitions.Services == nil {
 		return nil, errors.New("No Services found in wsdl definitions")
 	}
 
@@ -176,7 +173,7 @@ func (c *Client) Do(req *Request) (res *Response, err error) {
 		SoapAction: c.Definitions.GetSoapActionFromWsdlOperation(req.Method),
 	}
 
-	if p.SoapAction == "" && c.AutoAction {
+	if p.SoapAction == "" && c.AutoAction && len(c.Definitions.Services) != 0 {
 		p.SoapAction = fmt.Sprintf("%s/%s/%s", c.URL, c.Definitions.Services[0].Name, req.Method)
 	}
 
@@ -184,8 +181,30 @@ func (c *Client) Do(req *Request) (res *Response, err error) {
 	if err != nil {
 		return nil, err
 	}
+	/*
+		payload := string(p.Payload)
+		payload = strings.Replace(payload, "<Payment ", "<PaymentRequest ", 1)
+		payload = strings.Replace(payload, "</Payment>", "</PaymentRequest>", 1)
+		payload = strings.Replace(payload, "<s:Body", "<s:Body xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns:xsd=\"http://www.w3.org/2001/XMLSchema\"", 1)
+		p.Payload = []byte(payload)
+	*/
+	if customStringReplacements != nil {
+		payload := string(p.Payload)
+		for search, replace := range customStringReplacements {
+			payload = strings.ReplaceAll(payload, search, replace)
+		}
+		p.Payload = []byte(payload)
+	}
 
-	b, err := p.doRequest(c.Definitions.Services[0].Ports[0].SoapAddresses[0].Location)
+	//b, err := p.doRequest(c.Definitions.Services[0].Ports[0].SoapAddresses[0].Location)
+	soapAddress := overrideSoapEndpoint
+	if overrideSoapEndpoint == "" && len(c.Definitions.Services[0].Ports[0].SoapAddresses) > 0 {
+		soapAddress = c.Definitions.Services[0].Ports[0].SoapAddresses[0].Location
+	}
+	if soapAddress == "" {
+		return nil, errors.New("no Soap Addresses found in wsdl definitions and none provided")
+	}
+	b, err := p.doRequest(soapAddress)
 	if err != nil {
 		return nil, ErrorWithPayload{err, p.Payload}
 	}
@@ -243,9 +262,7 @@ func (p *process) doRequest(url string) ([]byte, error) {
 
 	req.Header.Add("Content-Type", "text/xml;charset=UTF-8")
 	req.Header.Add("Accept", "text/xml")
-	if p.SoapAction != "" {
-		req.Header.Add("SOAPAction", p.SoapAction)
-	}
+	req.Header.Add("SOAPAction", p.SoapAction)
 
 	resp, err := p.httpClient().Do(req)
 	if err != nil {
@@ -262,12 +279,6 @@ func (p *process) doRequest(url string) ([]byte, error) {
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
-		if !(p.Client.config != nil && p.Client.config.Dump) {
-			_, err := io.Copy(ioutil.Discard, resp.Body)
-			if err != nil {
-				return nil, err
-			}
-		}
 		return nil, errors.New("unexpected status code: " + resp.Status)
 	}
 

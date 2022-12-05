@@ -7,8 +7,11 @@ import (
 )
 
 var (
-	soapPrefix = "soap"
+	soapPrefix                            = "soap"
 	customEnvelopeAttrs map[string]string = nil
+
+	overrideSoapEndpoint                       = ""
+	customStringReplacements map[string]string = nil
 )
 
 // SetCustomEnvelope define customizated envelope
@@ -17,6 +20,18 @@ func SetCustomEnvelope(prefix string, attrs map[string]string) {
 	if attrs != nil {
 		customEnvelopeAttrs = attrs
 	}
+}
+
+// SetOverrideSoapEndpoint sets a custom URL to make the soap request to when using Call().
+// Use this if the WSDL does not contain a (valid) endpoint.
+func SetOverrideSoapEndpoint(url string) {
+	overrideSoapEndpoint = url
+}
+
+// SetCustomStringReplacements is used to perform search & replace on the SOAP request before sending.
+// Use this if the WSDL is broken.
+func SetCustomStringReplacements(replacements map[string]string) {
+	customStringReplacements = replacements
 }
 
 // MarshalXML envelope the body and encode to xml
@@ -30,17 +45,15 @@ func (c process) MarshalXML(e *xml.Encoder, _ xml.StartElement) error {
 
 	namespace := ""
 	if c.Client.Definitions.Types != nil {
-		schema := c.Client.Definitions.Types[0].XsdSchema[0]
-		namespace = schema.TargetNamespace
-		if namespace == "" && len(schema.Imports) > 0 {
-			namespace = schema.Imports[0].Namespace
-		}
+		namespace = c.Client.Definitions.Types[0].XsdSchema[0].TargetNamespace
 	}
 
 	tokens.startEnvelope()
-	if c.Client.HeaderParams != nil {
+	if len(c.Client.HeaderParams) > 0 {
 		tokens.startHeader(c.Client.HeaderName, namespace)
+
 		tokens.recursiveEncode(c.Client.HeaderParams)
+
 		tokens.endHeader(c.Client.HeaderName)
 	}
 
@@ -107,8 +120,6 @@ func (tokens *tokenData) recursiveEncode(hm interface{}) {
 	case reflect.String:
 		content := xml.CharData(v.String())
 		tokens.data = append(tokens.data, content)
-	case reflect.Struct:
-		tokens.data = append(tokens.data, v.Interface())
 	}
 }
 
@@ -130,7 +141,7 @@ func (tokens *tokenData) startEnvelope() {
 		e.Attr = make([]xml.Attr, 0)
 		for local, value := range customEnvelopeAttrs {
 			e.Attr = append(e.Attr, xml.Attr{
-				Name: xml.Name{Space: "", Local: local},
+				Name:  xml.Name{Space: "", Local: local},
 				Value: value,
 			})
 		}
